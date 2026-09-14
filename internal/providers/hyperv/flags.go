@@ -18,8 +18,8 @@ type flagValues struct {
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
-		User:         fs.String("hyperv-user", defaults.HyperV.User, "guest administrator account for SSH (password via CRABBOX_HYPERV_GUEST_PASSWORD)"),
+		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "prepared Generation 2 VHDX template (Windows or generalized Ubuntu cloud image)"),
+		User:         fs.String("hyperv-user", defaults.HyperV.User, "guest SSH account (Windows administrator password via CRABBOX_HYPERV_GUEST_PASSWORD; Linux key-only)"),
 		WorkRoot:     fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
 		CPUs:         fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
 		Memory:       fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
@@ -41,11 +41,18 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "hyperv-work-root") {
 		cfg.HyperV.WorkRoot = *v.WorkRoot
+		core.MarkHyperVWorkRootExplicit(cfg)
 	}
 	if flagWasSet(fs, "hyperv-cpu") {
+		if *v.CPUs <= 0 {
+			return exit(2, "--hyperv-cpu must be positive")
+		}
 		cfg.HyperV.CPUs = *v.CPUs
 	}
 	if flagWasSet(fs, "hyperv-memory") {
+		if *v.Memory <= 0 || int64(*v.Memory) > (1<<63-1)/(1024*1024) {
+			return exit(2, "--hyperv-memory must be a positive, representable number of MiB")
+		}
 		cfg.HyperV.Memory = *v.Memory
 	}
 	if flagWasSet(fs, "hyperv-switch") {

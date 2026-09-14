@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -164,6 +165,19 @@ func snapshotLeaseClaimsReadOnlyWithReader(read leaseClaimSnapshotReader) (lease
 	claimsDir := filepath.Join(dir, "claims")
 	entries, err := os.ReadDir(claimsDir)
 	if errors.Is(err, os.ErrNotExist) {
+		// Windows reports a missing child even when an existing ancestor is a file.
+		for parent := dir; ; parent = filepath.Dir(parent) {
+			info, parentErr := os.Stat(parent)
+			if parentErr == nil {
+				if !info.IsDir() {
+					return leaseClaimsSnapshot{}, errors.New("claim store ancestor is not a directory")
+				}
+				break
+			}
+			if !errors.Is(parentErr, os.ErrNotExist) || filepath.Dir(parent) == parent {
+				return leaseClaimsSnapshot{}, fmt.Errorf("inspect claim store ancestor: %w", parentErr)
+			}
+		}
 		return leaseClaimsSnapshot{}, nil
 	}
 	if err != nil {

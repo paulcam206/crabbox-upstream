@@ -72,6 +72,14 @@ All flags:
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		return exit(2, "provider=%s does not support cp; it has neither native copy nor an SSH lease transport", backend.Spec().Name)
 	}
+	// Native Windows SSH cp has one budget covering admission, probing, and
+	// transfer. Start it only after provider-native CopyBackend dispatch so
+	// other copy paths retain their existing timing.
+	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, windowsSFTPTimeout)
+		defer cancel()
+	}
 	lease, err := a.resolveSSHTransportLeaseTargetForRepo(ctx, &cfg, *id, true, false)
 	if err != nil {
 		return err
@@ -106,7 +114,7 @@ func isSandboxCopyArg(value string) bool {
 
 func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string, followLink bool, stdout, stderr anyWriter) (err error) {
 	if isWindowsNativeTarget(target) {
-		return exit(2, "SSH cp over rsync is not available for native Windows targets; use a provider-native copy backend or a WSL2 target")
+		return copyWindowsSFTP(ctx, target, src, dst, followLink, stdout, stderr)
 	}
 	terminationCtx, stopTerminationSignals := pondMeshTerminationContext(ctx)
 	defer stopTerminationSignals()

@@ -30,6 +30,7 @@ type LocalCommandResult = core.LocalCommandResult
 
 const (
 	providerName  = "hyperv"
+	targetLinux   = core.TargetLinux
 	targetWindows = core.TargetWindows
 	sshPort       = "22"
 )

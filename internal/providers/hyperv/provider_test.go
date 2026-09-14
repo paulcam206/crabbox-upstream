@@ -72,6 +72,7 @@ func commandKey(args []string) string {
 func testBackend(runner *recordingRunner) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
 	cfg.HyperV = core.HyperVConfig{
 		Image:         `C:\Images\windows.vhdx`,
 		User:          "crabbox",
@@ -101,7 +102,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}
 	}
-	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetWindows || spec.Targets[0].WindowsMode != core.WindowsModeNormal {
+	if len(spec.Targets) != 2 || spec.Targets[0].OS != core.TargetWindows || spec.Targets[0].WindowsMode != core.WindowsModeNormal || spec.Targets[1].OS != core.TargetLinux || spec.Targets[1].WindowsMode != "" {
 		t.Fatalf("unexpected targets: %#v", spec.Targets)
 	}
 }
@@ -118,12 +119,12 @@ func TestProviderAliasesResolve(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsLinux(t *testing.T) {
+func TestConfigureAcceptsLinux(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted linux target")
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err != nil {
+		t.Fatalf("Configure rejected linux target: %v", err)
 	}
 }
 
@@ -838,7 +839,12 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	runner.onRun = func(req core.LocalCommandRequest) {
+		if len(req.Args) != 0 && strings.HasPrefix(req.Args[len(req.Args)-1], "Start-VM ") {
+			cancel()
+		}
+	}
 	_, err := b.Acquire(ctx, core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "retained-failure",
@@ -879,6 +885,8 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var observed core.LeaseClaim
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.onRun = func(req core.LocalCommandRequest) {
@@ -888,11 +896,11 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 		claims, err := listLeaseClaims()
 		if err == nil && len(claims) == 1 {
 			observed = claims[0]
+			assertPublicClaimTarget(t, observed.LeaseID, targetWindows, core.WindowsModeNormal, "Windows-provisioning")
 		}
+		cancel()
 	}
 	b := testBackend(runner)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	_, err := b.Acquire(ctx, core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "rollback-failure",
@@ -1777,20 +1785,20 @@ func TestApplyDefaultsPreservesExplicitTarget(t *testing.T) {
 func TestApplyFlagsDefersTargetValidation(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.TargetOS = core.TargetLinux
+	cfg.TargetOS = core.TargetMacOS
 	core.MarkTargetExplicit(&cfg)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	fs.String("target", "linux", "")
+	fs.String("target", "macos", "")
 
 	if err := applyFlags(&cfg, fs, flagValues{}); err != nil {
 		t.Fatalf("applyFlags should defer target validation: %v", err)
 	}
-	if cfg.TargetOS != core.TargetLinux {
+	if cfg.TargetOS != core.TargetMacOS {
 		t.Fatalf("applyFlags rewrote explicit target to %s", cfg.TargetOS)
 	}
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("central provider configuration should reject target=linux")
+		t.Fatal("central provider configuration should reject target=macos")
 	}
 }
 

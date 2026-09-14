@@ -2457,7 +2457,7 @@ func (testHyperVProvider) Spec() ProviderSpec {
 		Name:        "hyperv",
 		Family:      "local-vm",
 		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}, {OS: targetLinux}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
 		Coordinator: CoordinatorNever,
 	}
@@ -2465,6 +2465,8 @@ func (testHyperVProvider) Spec() ProviderSpec {
 
 type testHyperVFlagValues struct {
 	Image  *string
+	User   *string
+	Root   *string
 	CPUs   *int
 	Memory *int
 	Switch *string
@@ -2473,6 +2475,8 @@ type testHyperVFlagValues struct {
 func (testHyperVProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 	return testHyperVFlagValues{
 		Image:  fs.String("hyperv-image", defaults.HyperV.Image, "Hyper-V image"),
+		User:   fs.String("hyperv-user", defaults.HyperV.User, "Hyper-V SSH user"),
+		Root:   fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Hyper-V work root"),
 		CPUs:   fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "Hyper-V CPUs"),
 		Memory: fs.Int("hyperv-memory", defaults.HyperV.Memory, "Hyper-V memory MB"),
 		Switch: fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V switch"),
@@ -2485,6 +2489,13 @@ func (testHyperVProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) 
 	}
 	if flagWasSet(fs, "hyperv-image") {
 		cfg.HyperV.Image = *v.Image
+	}
+	if flagWasSet(fs, "hyperv-user") {
+		cfg.HyperV.User = *v.User
+	}
+	if flagWasSet(fs, "hyperv-work-root") {
+		cfg.HyperV.WorkRoot = *v.Root
+		MarkHyperVWorkRootExplicit(cfg)
 	}
 	if flagWasSet(fs, "hyperv-cpu") {
 		cfg.HyperV.CPUs = *v.CPUs

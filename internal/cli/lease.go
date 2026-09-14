@@ -212,10 +212,14 @@ func EnsureTestboxKey(leaseID string) (string, string, error) {
 }
 
 func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
+	return EnsureTestboxKeyForConfigContext(context.Background(), cfg, leaseID)
+}
+
+func EnsureTestboxKeyForConfigContext(ctx context.Context, cfg Config, leaseID string) (string, string, error) {
 	if (cfg.Provider == "aws" || cfg.Provider == "azure") && cfg.TargetOS == targetWindows {
-		return ensureTestboxKeyWithType(leaseID, "rsa")
+		return ensureTestboxKeyWithTypeContext(ctx, leaseID, "rsa")
 	}
-	return ensureTestboxKey(leaseID)
+	return ensureTestboxKeyWithTypeContext(ctx, leaseID, "ed25519")
 }
 
 func EnsureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
@@ -223,6 +227,13 @@ func EnsureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, erro
 }
 
 func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
+	return ensureTestboxKeyWithTypeContext(context.Background(), leaseID, keyType)
+}
+
+func ensureTestboxKeyWithTypeContext(ctx context.Context, leaseID, keyType string) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	privatePath, err := testboxKeyPath(leaseID)
 	if err != nil {
 		return "", "", err
@@ -241,8 +252,12 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	if keyType == "rsa" {
 		args = []string{"-q", "-t", "rsa", "-b", "4096", "-N", "", "-C", "crabbox " + leaseID, "-f", privatePath}
 	}
-	cmd := exec.Command("ssh-keygen", args...)
+	cmd := exec.CommandContext(ctx, "ssh-keygen", args...)
+	cmd.WaitDelay = sshCommandWaitDelay
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return "", "", ctx.Err()
+		}
 		return "", "", exit(2, "generate ssh key for %s: %v: %s", leaseID, err, strings.TrimSpace(string(out)))
 	}
 	if err := secureSSHTransportPath(privatePath, false); err != nil {
@@ -292,6 +307,10 @@ func RemoveStoredTestboxKey(leaseID string) {
 // RemoveStoredTestboxConnectionArtifacts closes lease-owned SSH masters and removes canonical credentials.
 func RemoveStoredTestboxConnectionArtifacts(leaseID string) error {
 	return removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
+}
+
+func RemoveStoredTestboxConnectionArtifactsContext(ctx context.Context, leaseID string) error {
+	return removeStoredTestboxConnectionArtifacts(ctx, leaseID)
 }
 
 func providerKeyForLease(leaseID string) string {
