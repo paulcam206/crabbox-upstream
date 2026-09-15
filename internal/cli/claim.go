@@ -197,7 +197,7 @@ func snapshotLeaseClaimsReadOnlyWithReader(read leaseClaimSnapshotReader) (lease
 			}
 			continue
 		}
-		info, err := entry.Info()
+		info, err := fileSnapshotPathInfo(filepath.Join(claimsDir, entry.Name()))
 		if err != nil {
 			snapshot.invalid[leaseID] = leaseClaimSnapshotReadError(leaseID, "inspect", err)
 			continue
@@ -1775,7 +1775,7 @@ func readLeaseClaimSnapshotWithPresence(path, leaseID string, expected os.FileIn
 	}
 	defer file.Close()
 
-	opened, err := file.Stat()
+	opened, err := fileSnapshotHandleInfo(file)
 	if err != nil {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "inspect opened", err)
 	}
@@ -1796,11 +1796,11 @@ func readLeaseClaimSnapshotWithPresence(path, leaseID string, expected os.FileIn
 	if tooLarge {
 		return leaseClaim{}, true, leaseClaimSnapshotTooLargeError(leaseID)
 	}
-	afterRead, err := file.Stat()
+	afterRead, err := fileSnapshotHandleInfo(file)
 	if err != nil {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "inspect read", err)
 	}
-	current, err := os.Lstat(path)
+	current, err := fileSnapshotPathInfo(path)
 	if err != nil {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "verify current", err)
 	}
@@ -1824,7 +1824,7 @@ func readLocalClaimInventoryData(r io.Reader) ([]byte, bool, error) {
 }
 
 func sameLeaseClaimSnapshotFile(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+	return a != nil && b != nil && sameFileSnapshotIdentity(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
 func leaseClaimSnapshotReadError(leaseID, action string, err error) error {

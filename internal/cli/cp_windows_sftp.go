@@ -125,7 +125,7 @@ func windowsSFTPWirePath(native string) string {
 }
 
 func windowsSFTPRegularFile(name string) (os.FileInfo, error) {
-	info, err := os.Lstat(name)
+	info, err := fileSnapshotPathInfo(name)
 	if err != nil {
 		return nil, err
 	}
@@ -145,11 +145,11 @@ func windowsSFTPHash(ctx context.Context, name string) (windowsSFTPMetadata, err
 		return windowsSFTPMetadata{}, err
 	}
 	defer f.Close()
-	opened, err := f.Stat()
+	opened, err := fileSnapshotHandleInfo(f)
 	if err != nil {
 		return windowsSFTPMetadata{}, err
 	}
-	if !os.SameFile(info, opened) {
+	if !sameFileSnapshotIdentity(info, opened) {
 		return windowsSFTPMetadata{}, errors.New("copy file changed while opening it")
 	}
 	h := sha256.New()
@@ -187,8 +187,8 @@ func snapshotWindowsSFTPSource(ctx context.Context, source, destination string) 
 		return windowsSFTPMetadata{}, err
 	}
 	defer func() { err = errors.Join(err, input.Close()) }()
-	current, err := input.Stat()
-	if err != nil || !os.SameFile(info, current) {
+	current, err := fileSnapshotHandleInfo(input)
+	if err != nil || !sameFileSnapshotIdentity(info, current) {
 		return windowsSFTPMetadata{}, errors.Join(errors.New("copy source changed while opening it"), err)
 	}
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

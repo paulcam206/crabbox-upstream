@@ -33,8 +33,8 @@ $env:CRABBOX_TEST_REQUIRE_SFTP = '1'
 $env:TEMP = Join-Path $OutputDirectory 'tmp'
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Path $env:TEMP | Out-Null
-$required = @('TestWindowsSFTPPathContract','TestWindowsSFTPMetadataOutputIsBoundedThroughCopy','TestWindowsSFTPBehavior','TestWindowsSFTPStreamedLargeFile')
-$events = @(go test .\internal\cli -run '^TestWindowsSFTP' -count=1 -timeout=15m -json)
+$required = @('TestWindowsSFTPPathContract','TestWindowsSFTPMetadataOutputIsBoundedThroughCopy','TestWindowsSFTPBehavior','TestWindowsSFTPStreamedLargeFile','TestWindowsFileSnapshotIdentity','TestWindowsFileSnapshotRejectsReplacedIdentity','TestWindowsFileSnapshotRejectsSymlinkReplacement')
+$events = @(go test .\internal\cli -run '^TestWindows(SFTP|FileSnapshot)' -count=1 -timeout=15m -json)
 $code = $LASTEXITCODE
 $log = Join-Path $OutputDirectory 'tests.jsonl'
 [IO.File]::WriteAllText($log, [string]::Join("`n", [string[]]$events) + "`n", [Text.UTF8Encoding]::new($false))

@@ -103,6 +103,14 @@ SFTP INIT/VERSION packets, cancellation and a 2 GiB-plus-17-byte round trip.
 It starts no SSH service, performs no SSH authentication, and changes no global
 settings. The CI lane requires every named case to run and pass without skips.
 
+Windows source snapshots compare native full 128-bit file identities, avoiding
+mixed directory/handle IDs on ReFS. To explicitly exercise an existing ReFS
+volume in the identity regression lane, set `CRABBOX_TEST_FILESYSTEM_ROOT` to
+an owned test parent and `CRABBOX_TEST_REQUIRE_REFS=1`. The latter fails if the
+fixture is not really on ReFS. The tests retain replacement and symlink negatives;
+ordinary Windows CI proves the native mechanism on its available filesystem
+without pretending that NTFS is ReFS coverage.
+
 ### POSIX and WSL transports
 
 The rsync path requires rsync on both sides. The local client must be rsync

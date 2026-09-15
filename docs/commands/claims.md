@@ -76,6 +76,13 @@ records carrying an inert internal `normal` default. `targetOS` remains the
 plain OS name (for example `linux`), never `linux/normal`. Windows claims
 retain their actual `normal` or `wsl2` mode. Raw records are not rewritten.
 
+On Windows, scan, open-handle and post-read identity snapshots use the same
+Win32 `FileIdInfo` route: a 64-bit volume serial plus the full 128-bit file ID.
+This is required on ReFS, where mixing directory-enumeration and legacy handle
+IDs can reject an unchanged file. Identity, mode, size and modification time
+must all agree; unsupported or unknown identity remains a `read_error` rather
+than falling back to path names or metadata-only matching.
+
 ## Exit codes
 
 - `0`: the snapshot is missing, empty, or contains only valid claims.
