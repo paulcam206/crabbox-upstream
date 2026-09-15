@@ -158,7 +158,7 @@ jobs:
       - name: Verify versioned remote module installation
         run: scripts/verify-go-install.sh v0.0.0 "$(git rev-parse HEAD)"
 
-  windows-native-sftp:
+  windows-native:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -167,11 +167,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Verify native SFTP protocol and multi-GB evidence without SSH authentication
+      - name: Verify native SFTP, file identity, and host PowerShell credentials
         shell: pwsh
         env:
           CGO_ENABLED: "0"
-        run: .\scripts\test-windows-sftp.ps1
+        run: .\scripts\test-windows-native.ps1
 
   windows-pond-mesh-cancellation:
     name: Windows Pond Mesh Cancellation

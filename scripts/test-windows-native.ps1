@@ -34,17 +34,25 @@ $env:TEMP = Join-Path $OutputDirectory 'tmp'
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Path $env:TEMP | Out-Null
 $required = @('TestWindowsSFTPPathContract','TestWindowsSFTPMetadataOutputIsBoundedThroughCopy','TestWindowsSFTPBehavior','TestWindowsSFTPStreamedLargeFile','TestWindowsFileSnapshotIdentity','TestWindowsFileSnapshotRejectsReplacedIdentity','TestWindowsFileSnapshotRejectsSymlinkReplacement')
-$events = @(go test .\internal\cli -run '^TestWindows(SFTP|FileSnapshot)' -count=1 -timeout=15m -json)
-$code = $LASTEXITCODE
-$log = Join-Path $OutputDirectory 'tests.jsonl'
-[IO.File]::WriteAllText($log, [string]::Join("`n", [string[]]$events) + "`n", [Text.UTF8Encoding]::new($false))
-$events | ForEach-Object { Write-Host $_ }
-if ($code -ne 0) { exit $code }
-$records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
-foreach ($name in $required) {
-  foreach ($action in @('run','pass')) {
-    if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) { throw "$name did not $action" }
+
+# Each lane needs a real Windows host, so none of them can run in the Linux
+# suite. A lane that loses a required case is a failure, never a quiet skip.
+function Invoke-NativeLane([string]$Package, [string]$Pattern, [string[]]$Required, [string]$LogName) {
+  $events = @(go test $Package -run $Pattern -count=1 -timeout=15m -json)
+  $code = $LASTEXITCODE
+  $log = Join-Path $OutputDirectory $LogName
+  [IO.File]::WriteAllText($log, [string]::Join("`n", [string[]]$events) + "`n", [Text.UTF8Encoding]::new($false))
+  $events | ForEach-Object { Write-Host $_ }
+  if ($code -ne 0) { exit $code }
+  $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
+  foreach ($name in $Required) {
+    foreach ($action in @('run','pass')) {
+      if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) { throw "$name did not $action" }
+    }
   }
+  if ($records | Where-Object { $_.Action -eq 'skip' }) { throw "Required lane $Package skipped a case" }
+  Write-Host "Verified $Package lane: $log"
 }
-if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'Required SFTP lane skipped a case' }
-Write-Host "Verified no-network SFTP lane: $log"
+
+Invoke-NativeLane '.\internal\cli' '^TestWindows(SFTP|FileSnapshot)' $required 'tests.jsonl'
+Invoke-NativeLane '.\internal\providers\hyperv' '^TestGuestCredentialSurvivesCorePollutedModulePath$' @('TestGuestCredentialSurvivesCorePollutedModulePath') 'hyperv-credential.jsonl'

@@ -908,6 +908,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (resu
 	if env == nil {
 		env = os.Environ()
 	}
+	env = localCommandChildEnv(req.Name, env)
 	// Controller acquire acknowledgment and process-tree ownership are parent /
 	// child controls. Provider adapters must never inherit them.
 	cmd.Env = stripControllerAcquireIdentityEnv(env)

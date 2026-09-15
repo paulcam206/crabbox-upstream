@@ -207,6 +207,10 @@ legacy target identity is not defaulted to Windows or Linux.
   Crabbox's local-forward `tunnel` command is not a replacement for `ssh -R`.
 - Compiled capability output and fake-host tests do not qualify an image.
   Verify boot, KVP, SSH, copy and exact cleanup on explicitly authorized clones.
+- Host Hyper-V calls run in Windows PowerShell with no inherited
+  `PSModulePath`, so a PowerShell 7 caller cannot make Desktop PowerShell
+  resolve an in-box module such as `Microsoft.PowerShell.Security` to its Core
+  copy. Machine and user module paths still apply.
 
 ## Examples
 

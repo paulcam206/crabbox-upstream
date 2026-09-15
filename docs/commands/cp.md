@@ -97,7 +97,7 @@ the verified file was published and identifies the retained owned staging
 directory. Local publication uses a Windows atomic write-through replacement;
 no POSIX directory-sync assumption or legacy SCP fallback is used.
 
-The dedicated `scripts\test-windows-sftp.ps1` lane downloads a pinned,
+The dedicated `scripts\test-windows-native.ps1` lane downloads a pinned,
 hash-verified portable OpenSSH fixture into a new directory and checks actual
 SFTP INIT/VERSION packets, cancellation and a 2 GiB-plus-17-byte round trip.
 It starts no SSH service, performs no SSH authentication, and changes no global

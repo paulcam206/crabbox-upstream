@@ -696,13 +696,21 @@ func (b *backend) invokeGuestScript(ctx context.Context, script string, env []st
 	return b.powershellWithEnv(attemptCtx, script, env)
 }
 
+// guestCredentialScript builds the host-side PSCredential used by PowerShell
+// Direct. The password arrives through _CRABBOX_GP so it never reaches argv.
+func guestCredentialScript(user string) string {
+	return fmt.Sprintf(
+		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `,
+		escapePSString(user),
+	)
+}
+
 // waitGuestReady gates the first real guest call on authenticated PowerShell
 // Direct readiness. Each probe is bounded because early boot calls can block.
 func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error {
-	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
-		escapePSString(user), escapePSString(vmName),
+	script := guestCredentialScript(user) + fmt.Sprintf(
+		`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
+		escapePSString(vmName),
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	// Include attempts and backoff in the overall boot budget.
@@ -750,10 +758,9 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 // Direct with bounded retries. The guest password is passed through
 // _CRABBOX_GP, never the command line.
 func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
-	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
-		escapePSString(user), escapePSString(vmName), scriptBlock,
+	script := guestCredentialScript(user) + fmt.Sprintf(
+		`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
+		escapePSString(vmName), scriptBlock,
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	var lastErr error
