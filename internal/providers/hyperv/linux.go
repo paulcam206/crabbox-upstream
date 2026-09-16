@@ -273,6 +273,18 @@ func validateLinuxStorageName(name string) error {
 }
 
 func linuxVMCreateScript(cfg Config, name string) string {
+	// The NoCloud seed must be openable by the Hyper-V management service, which runs as SYSTEM.
+	// Mounting a VHDX makes Windows replace the file's DACL with a protected one that drops
+	// inheritance and grants only the mounting user, and dismounting does not restore it -- so the
+	// seed arrives here with the SYSTEM entry missing and Add-VMHardDiskDrive fails with "Cannot
+	// get information for attachment ... Access is denied (0x80070005)". Every Linux lease died
+	// there.
+	//
+	// The grant is made immediately before the attach rather than when the seed is written,
+	// because something between those two points re-protects the DACL a second time: a stopgap
+	// that granted once at creation had its grant reverted and had to re-grant about eight seconds
+	// later, which is this script's window. Which operation does it was not isolated; granting at
+	// the point of use is correct regardless, since it is the last moment before the file is read.
 	return fmt.Sprintf(`$ErrorActionPreference='Stop'
 if (Get-VM -Name '%[1]s' -ErrorAction SilentlyContinue) { throw 'Hyper-V VM name already exists' }
 $switch = Get-VMSwitch -Name '%[2]s' -ErrorAction Stop
@@ -281,6 +293,8 @@ $vm = New-VM -Name '%[1]s' -MemoryStartupBytes %[5]d -Generation 2 -VHDPath '%[3
 $vm | Set-VM -ProcessorCount %[7]d -AutomaticCheckpointsEnabled $false -ErrorAction Stop
 Set-VMMemory -VM $vm -DynamicMemoryEnabled $false -ErrorAction Stop
 Set-VMFirmware -VM $vm -EnableSecureBoot On -SecureBootTemplate MicrosoftUEFICertificateAuthority -ErrorAction Stop
+icacls.exe '%[8]s' /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'NoCloud seed ACL update failed' }
 Add-VMHardDiskDrive -VM $vm -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1 -Path '%[8]s' -ErrorAction Stop
 Connect-VMNetworkAdapter -VMName '%[1]s' -SwitchName $switch.Name -ErrorAction Stop
 $vm | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress

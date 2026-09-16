@@ -45,6 +45,14 @@ func TestLinuxVMCreationPowerShellBehavior(t *testing.T) {
 	if err := reserveLinuxStorage(name, "cbx_script"); err != nil {
 		t.Fatal(err)
 	}
+	// The real flow writes the NoCloud seed before this script runs, and the script now repairs
+	// that file's ACL before attaching it. A fixture without a seed is not the production shape.
+	if err := os.MkdirAll(filepath.Dir(cloudInitSeedPath(name)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cloudInitSeedPath(name), []byte("fake seed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	receipt := filepath.Join(t.TempDir(), "result.json")
 	script := `Import-Module Microsoft.PowerShell.Management
 	Import-Module Microsoft.PowerShell.Utility
@@ -198,5 +206,94 @@ try {
 				}
 			}
 		})
+	}
+}
+
+// The NoCloud seed must be openable by the Hyper-V management service, which runs as SYSTEM.
+// Mount-VHD leaves the seed with a protected DACL and no SYSTEM entry, and something between
+// writing the seed and attaching it re-protects the file a second time, so the grant has to be
+// made here -- immediately before Add-VMHardDiskDrive -- or the attach fails with
+// "Account does not have permission to open attachment ... 0x80070005" and no Linux lease can
+// ever be acquired.
+//
+// This drives the REAL generated script over a REAL file and then reads the access control
+// entries actually left behind, rather than asserting that some function was called. The fixture
+// reproduces the hostile starting state (inheritance stripped, only the caller granted) and the
+// stubbed Add-VMHardDiskDrive records the DACL AS THE ATTACH WOULD SEE IT, so a grant made too
+// late would not satisfy it.
+func TestLinuxVMCreateGrantsSystemAccessBeforeAttachingSeed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell behavioral lane")
+	}
+	executable, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Fatal("Windows PowerShell is required for the seed behavioral lane")
+	}
+	f := newLinuxFixture(t)
+	const name = "crabbox-vm-acl"
+	if err := reserveLinuxStorage(name, "cbx_acl"); err != nil {
+		t.Fatal(err)
+	}
+	seed := cloudInitSeedPath(name)
+	if err := os.MkdirAll(filepath.Dir(seed), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seed, []byte("fake seed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receipt := filepath.Join(t.TempDir(), "acl.json")
+	script := `Import-Module Microsoft.PowerShell.Management
+Import-Module Microsoft.PowerShell.Utility
+$PSModuleAutoloadingPreference='None'
+# The state a real Mount-VHD leaves behind: protected, caller only, no SYSTEM.
+icacls.exe '` + seed + `' /inheritance:r /grant:r ($env:USERNAME + ':F') | Out-Null
+function Get-VM { param($Name,$ErrorAction) }
+function Get-VMSwitch { param($Name,$ErrorAction) [pscustomobject]@{Name=$Name} }
+function New-VHD { param($Path,$ParentPath,[switch]$Differencing,$ErrorAction) [IO.File]::WriteAllText($Path,'child') }
+function New-VM {
+ param($Name,$MemoryStartupBytes,$Generation,$VHDPath,$Path,$ErrorAction)
+ [pscustomobject]@{Name=$Name;State=3;Id='f72621ca-fb8c-4d75-a7af-18fac5046fda'}
+}
+function Set-VM { param([Parameter(ValueFromPipeline=$true)]$InputObject,$ProcessorCount,$AutomaticCheckpointsEnabled) process { $InputObject } }
+function Set-VMMemory { param($VM,$DynamicMemoryEnabled,$ErrorAction) }
+function Set-VMFirmware { param($VM,$EnableSecureBoot,$SecureBootTemplate,$ErrorAction) }
+function Add-VMHardDiskDrive {
+ param($VM,$ControllerType,$ControllerNumber,$ControllerLocation,$Path,$ErrorAction)
+ # Record the DACL exactly as the attach would see it: a grant made after this point is too late.
+ $rules = [IO.File]::GetAccessControl($Path).GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
+ $seen = [pscustomobject]@{
+  System=@($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-18' }).Count
+  Admins=@($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-544' }).Count
+ }
+ $seen | ConvertTo-Json -Compress | Set-Content -LiteralPath $env:CBX_ACL_RECEIPT -Encoding ASCII
+}
+function Connect-VMNetworkAdapter { param($VMName,$SwitchName,$ErrorAction) }
+` + linuxVMCreateScript(f.b.configForRun(), name) + `
+`
+	scriptPath := filepath.Join(t.TempDir(), "vm-acl-fixture.ps1")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+	cmd.Env = append(os.Environ(), "CBX_ACL_RECEIPT="+receipt)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated VM create script: %v\n%s", err, output)
+	}
+	raw, err := os.ReadFile(receipt)
+	if err != nil {
+		t.Fatalf("attach never happened, so the seed ACL was never observed: %v\n%s", err, output)
+	}
+	var seen struct{ System, Admins int }
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &seen); err != nil {
+		t.Fatalf("invalid ACL receipt: %v\n%s", err, raw)
+	}
+	if seen.System == 0 {
+		t.Fatal("seed carried no SYSTEM entry when the attach read it; Hyper-V VMMS cannot open the attachment and every Linux lease fails at Add-VMHardDiskDrive")
+	}
+	if seen.Admins == 0 {
+		t.Fatal("seed carried no Administrators entry when the attach read it")
 	}
 }
