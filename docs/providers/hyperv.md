@@ -7,10 +7,18 @@ Family: `local-vm`
 
 ## Overview
 
-The Hyper-V provider creates and manages Windows virtual machines on a local
-Windows host using Microsoft Hyper-V. VMs are provisioned as Generation 2 VMs
-from a pre-configured VHDX template, connected to a configurable virtual switch
-(default: "Default Switch"), and accessed over SSH via Windows OpenSSH.
+The Hyper-V provider creates and manages Windows virtual machines on a
+local Windows host using Microsoft Hyper-V. VMs are provisioned as Generation 2
+VMs from a Windows VHDX template, connected to a configurable virtual
+switch (default: "Default Switch"), and accessed over SSH. Windows normal mode
+is the default target when `--target` is omitted.
+
+| Capability | Windows normal |
+| --- | --- |
+| SSH, Crabbox sync, cleanup | Yes |
+| Pause and resume | Yes |
+| Desktop and browser | Yes, through PowerShell Direct |
+| Workspace checkpoint, fork, restore, provider snapshot | Yes |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -20,21 +28,122 @@ reject configuration on non-Windows hosts.
 
 - Windows 10 Pro/Enterprise/Education or Windows Server with Hyper-V enabled
 - PowerShell 5.1 or later (ships with Windows)
-- A Windows VHDX template (Generation 2 / UEFI) with:
+- A Generation 2 / UEFI VHDX template for the Windows guest
+- A Windows VHDX with:
   - A local administrator account selected with `--hyperv-user`, with its
     password explicitly provided through `CRABBOX_HYPERV_GUEST_PASSWORD`
   - Network configured for DHCP on the Hyper-V virtual switch
   - Guest internet access to GitHub when OpenSSH or git must be installed on
     first use
-- The Hyper-V PowerShell module (included with the Hyper-V feature)
+- The Hyper-V and Windows storage PowerShell modules
 
-OpenSSH and git do **not** need to be pre-installed. When missing, the provider
-installs pinned, SHA-256-verified Win32-OpenSSH (matching the guest architecture)
-and MinGit packages. Existing installations are reused. The OpenSSH bootstrap
-does not require Windows Update or Features on Demand. ISO images are not
-supported; use an installed VHDX with a known administrator password.
+### Host permissions and doctor
 
-### Preparing a template
+Run Crabbox on the Hyper-V host from an account authorized to manage Hyper-V
+VMs, switches, VHDXs, and storage. Membership in
+the local `Hyper-V Administrators` group is sufficient and needs no elevation;
+otherwise use an elevated shell.
+
+Do not run the host-side Crabbox process as `LocalSystem`. Session 0 is only a
+convenience for **unattended** hosts, where failed early PowerShell Direct
+authentication can display credential UI that no one dismisses. It is unrelated
+to the guest interactive desktop that `--desktop` and `desktop proof` establish
+inside the VM. A `LocalSystem` host process resolves a different profile, so SSH
+known-hosts, Crabbox config, and `PATH` differ from the invoking user, per-user
+tools such as `ffmpeg` are missing, leftover state becomes `LocalSystem`-owned
+and needs elevation to remove, and elevation wrappers can corrupt captured
+command output.
+
+`crabbox doctor --provider hyperv` is non-mutating. It checks that the host is
+Windows, queries the Hyper-V optional feature, inventories VMs, and reports the
+configured image path. It does not validate that the image exists or boots,
+that Windows credentials work, or that optional browser requirements are satisfied. `--probe-ssh` reports that a running lease is
+required rather than creating one. Its Hyper-V optional-feature query calls
+`Get-WindowsOptionalFeature`, which requires elevation even when provisioning
+does not, so an unelevated `Hyper-V Administrators` shell reports that one check
+as failed while acquire, proof, and release still work.
+
+OpenSSH and git do **not** need to be pre-installed. On first acquire the
+provider installs the pinned, SHA-256-verified Win32-OpenSSH MSI used by the
+`Microsoft.OpenSSH.Preview` winget package and, if absent, portable MinGit
+(also pinned and SHA-256-verified). Both installs are no-ops when already
+present, so a template that pre-bakes inbox/FoD OpenSSH, the MSI version, or git
+skips the matching per-lease download. OpenSSH bootstrap does not depend on
+Windows Update, WSUS, or a matching Features on Demand source. This keeps the
+template requirement to a plain Windows VHDX with a known admin password. ISO
+images are not supported — provide a fully installed VHDX.
+
+Windows acquisition allows up to 15 minutes overall, including a five-minute
+authenticated PowerShell Direct readiness budget after VM creation. An external
+five-minute timeout can terminate acquisition before that readiness budget
+finishes. Bootstrap progress on stderr distinguishes waiting for authentication
+from completed credential escrow, SSH lockdown, and network connection. A booted
+VM or a started network adapter alone does not prove guest authentication.
+
+## Desktop and browser capabilities
+
+`--desktop` installs the pinned, SHA-256-verified TightVNC server after the
+OpenSSH and git bootstrap completes. TightVNC is configured without a firewall
+exception and restricted to loopback; connect through Crabbox's SSH-backed VNC
+or WebVNC commands. The guest account password is passed to PowerShell Direct
+through the host process environment and a remoting argument, never on the
+host command line. TightVNC receives a separate generated password stored at
+`C:\ProgramData\crabbox\vnc.password`.
+
+The desktop setup enables auto-logon and performs one expected Windows reboot.
+Acquisition waits for bounded PowerShell Direct readiness, reruns the marked
+idempotent setup after reboot, then waits for SSH, loopback VNC, and an active
+interactive session for the configured `--hyperv-user` with a running Explorer
+shell. TightVNC service readiness alone is not desktop readiness. If auto-logon
+settings were applied to an already-marked template but no usable session
+appears, acquisition performs at most two explicit bounded reboot retries,
+reapplies the idempotent setup, waits again, and requires repeated stable SSH
+probes.
+`desktop=true` is recorded only after all checks succeed.
+
+`--browser` is probe-only. After final SSH readiness, Crabbox accepts an
+existing Microsoft Edge or Google Chrome installation. It does not install a
+browser, and acquisition fails with a capability error when neither browser is
+present. The `browser=true` label is recorded only after the probe succeeds.
+
+For native Windows screenshot, video, and `desktop proof`, use a **fresh**
+desktop lease acquired by the pinned Crabbox binary. Retained leases are not
+backfilled with the credential/session contract. Git for Windows supplies
+Mintty, and MP4 encoding requires local `ffmpeg` on the Hyper-V host:
+
+```powershell
+& $crabboxPath warmup --provider hyperv --target windows --desktop --keep `
+  --hyperv-image 'E:\vhd\windows-template.vhdx' `
+  --hyperv-user crabbox --hyperv-switch 'Default Switch'
+
+ffmpeg -version
+& $crabboxPath desktop proof --provider hyperv --id <lease> `
+  --output 'C:\proof\<lease>' -- cmd.exe /d /c "echo desktop-proof"
+
+& $crabboxPath stop --provider hyperv <lease>
+```
+
+Run this provider flow as the invoking interactive user, not as `LocalSystem`.
+The interactive session the proof requires is the guest session belonging to the
+SSH user, which the proof launcher targets; the host-side session is irrelevant.
+Screenshot and video capture use short-lived interactive tasks in per-capture
+directories protected for only the lease user, Builtin Administrators, and
+LocalSystem. Normal completion and failure paths delete the tasks, scripts,
+frames, archives, and protected directories; always stop the lease to remove the
+VM and differencing disk.
+
+Crabbox copies any PowerShell payload larger than 4 KB to the guest and runs it
+with a short argument-based command, because Windows OpenSSH intermittently
+wedges its per-connection event loop while forwarding a large stdin payload;
+when that happens the guest never finishes reading stdin and ssh aborts with
+`Timeout, server <host> not responding` even though the guest is healthy.
+
+Actions runner, screenshot, and video task setup decode
+`windows.password` as strict UTF-8, preserve Unicode plus leading/trailing
+whitespace exactly, and reject only a zero-length file. The credential is never
+trimmed, logged, or added to native process arguments.
+
+### Preparing a Windows template
 
 The only thing a base Windows VHDX needs is a reachable administrator account.
 For example, from an elevated prompt inside the guest before capturing it:
@@ -90,13 +199,13 @@ The guest password and credential-presence information are not displayed;
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--hyperv-image` | (none) | Path to a Windows VHDX template (required) |
-| `--hyperv-user` | `crabbox` | Local guest administrator account for SSH; letters, digits, `.`, `_`, and `-` only (password via `CRABBOX_HYPERV_GUEST_PASSWORD`) |
-| `--hyperv-work-root` | `C:\crabbox` | Crabbox work root inside the guest |
+| `--hyperv-image` | (none) | Path to the guest VHDX template (required) |
+| `--hyperv-user` | `crabbox` | Guest account for SSH; letters, digits, `.`, `_`, and `-` only |
+| `--hyperv-work-root` | `C:\crabbox` | Guest work root |
 | `--hyperv-cpu` | `4` | Number of virtual CPUs |
 | `--hyperv-memory` | `8192` | Memory in MB |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
-| `--hyperv-init-password` | `false` | Set the guest password at first boot via the lease disk (password-less auto-logon templates) |
+| `--hyperv-init-password` | `false` | Windows only: set the guest password at first boot via the lease disk |
 
 Decoded negative CPU or memory values, including environment and explicit flag
 values, are rejected when creating a VM, before native commands or local lease
@@ -123,8 +232,8 @@ hyperv:
   initPassword: false
 ```
 
-Keep `CRABBOX_HYPERV_GUEST_PASSWORD` in the environment or trusted user config,
-not repository config. There is no default guest password.
+For Windows, keep `CRABBOX_HYPERV_GUEST_PASSWORD` in the environment or trusted
+user config, not repository config. There is no default guest password.
 
 ### Environment variables
 
@@ -136,28 +245,53 @@ not repository config. There is no default guest password.
 | `CRABBOX_HYPERV_CPUS` | CPU count |
 | `CRABBOX_HYPERV_MEMORY` | Memory in MB |
 | `CRABBOX_HYPERV_SWITCH` | Virtual switch name |
-| `CRABBOX_HYPERV_GUEST_PASSWORD` | Guest user password for SSH key injection |
-| `CRABBOX_HYPERV_INIT_PASSWORD` | Set the guest password at first boot (`true`/`false`) |
+| `CRABBOX_HYPERV_GUEST_PASSWORD` | Windows guest password for PowerShell Direct bootstrap |
+| `CRABBOX_HYPERV_INIT_PASSWORD` | Windows only: set the guest password at first boot (`true`/`false`) |
 
 ## Bootstrap contract
 
-During `Acquire`, the provider:
+All targets start with a per-lease differencing root VHDX over the configured
+template and a Generation 2 VM.
 
-1. Creates a per-lease **differencing disk** backed by the template (near-instant
-   and space-thin; the template stays read-only and shared — no multi-GB copy)
+### Windows
+
+During Windows `Acquire`, the provider:
+
+1. Creates the per-lease differencing disk backed by the template.
 2. With `--hyperv-init-password`, mounts the lease disk offline and writes a
    first-boot `RunOnce` that sets the guest password (password-less templates)
 3. Creates and starts the VM with its network adapter disconnected
-4. Waits for PowerShell Direct readiness within a bounded boot timeout
-5. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
+4. Waits for a trivial authenticated PowerShell Direct call to succeed. The
+   readiness loop has an overall boot budget and bounds each attempt so a guest
+   that is still booting cannot hang acquisition.
+5. Escrows the exact guest password at
+   `C:\ProgramData\crabbox\windows.password` for durable GitHub Actions runner
+   startup. The password reaches the host PowerShell process only through
+   `_CRABBOX_GP` and reaches the guest only through the remoting argument list.
+   Crabbox writes UTF-8 without a BOM or newline to an empty temporary file
+   after applying a fresh protected ACL containing only the selected local user,
+   Builtin Administrators, and LocalSystem, then atomically replaces the target.
+   The password is never added to lease claims, labels, or logs.
+6. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
    rule, replace authorized keys, discard template `Match` authentication
    blocks, and restrict SSH to the selected user
-6. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
+7. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
    GitHub if `sshd` is absent, and keeps sshd stopped behind the quarantine rule
-7. Reapplies the final key-only config, validates `sshd_config`, regenerates
+8. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
-8. Installs git (MinGit) if absent — required for Crabbox sync
-9. Waits for SSH readiness on the injected key
+9. Installs full, pinned Git for Windows (including Mintty) for `--desktop`;
+   otherwise installs pinned MinGit when git is absent
+10. With `--desktop`, installs/configures loopback-only TightVNC, handles its
+    expected setup reboot through bounded PowerShell Direct retries, and reruns
+    the marked setup idempotently
+11. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
+    VNC plus an active Explorer-backed session for the configured guest user,
+    followed by repeated stable SSH probes.
+    When auto-logon settings have not taken effect, it performs at most two
+    explicit reboot retries and repeats the bounded readiness checks
+12. With `--browser`, probes for Edge or Chrome without installing either
+13. Records successful desktop/browser lease labels only after all requested
+    readiness checks pass
 
 PowerShell Direct calls use the guest administrator password. Readiness and
 later guest operations have bounded retries, preventing a stalled call from
@@ -167,6 +301,44 @@ Exhausting the PowerShell Direct boot-readiness budget reports a timeout while
 preserving the last probe's diagnostic and public exit code. Caller cancellation
 still takes precedence over that provider-owned budget.
 
+## Workspace checkpoints
+
+Workspace checkpoint, fork, restore, and provider snapshot capabilities are
+available for Windows normal leases. They use
+the native checkpoint kind `hyperv-vhdx` and
+`CheckpointType ProductionOnly`; Crabbox never permits Hyper-V to fall back to
+a standard checkpoint.
+
+Checkpoint exports remain owned by the checkpoint artifact directory and
+survive release of the source lease. Restore is source-only: it verifies the
+exact original VM identity and lease claim, applies the production checkpoint,
+re-resolves DHCP/SSH, and refreshes the claim without changing the source
+hostname or SSH identity.
+
+Before any checkpoint disk mutation, Crabbox durably journals the source VM
+identity, unique snapshot name, and owned export directory. A journal write
+failure aborts before mutation; an interrupted export retains its cleanup
+identity rather than authorizing another checkpoint submission.
+
+Windows forks import the exported VM with a generated Hyper-V VM ID and dynamic
+MAC, then rotate the guest identity through PowerShell Direct before the fork
+becomes reachable.
+
+## Pause and resume
+
+`crabbox pause --provider hyperv <lease>` uses Hyper-V saved state so the VM
+releases host CPU and memory while preserving guest state. A running VM is
+saved with `Save-VM`; a Hyper-V `Paused` VM is also converted to saved state
+because Hyper-V pause alone retains the VM's assigned memory. Pausing an
+already saved lease is a no-op.
+
+`crabbox resume --provider hyperv <lease>` starts a saved VM with `Start-VM`.
+For a VM left in Hyper-V's native `Paused` state, Crabbox uses `Resume-VM`.
+After either transition, Crabbox waits for DHCP and SSH readiness, then
+atomically refreshes the local lease claim with the current IP address. Pause
+and resume require an exact local claim for the VM; stopped or missing VMs are
+reported as errors.
+
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider
 requires an explicit value and disables SSH password authentication after key
@@ -174,35 +346,42 @@ installation.
 
 ## Lifecycle
 
-1. **Acquire**: Creates a per-lease differencing disk over the template
-   (`New-VHD -Differencing -ParentPath`), creates a Generation 2 VM (`New-VM`),
-   configures CPU count and disables automatic checkpoints (`Set-VM`), starts
-   the VM disconnected (`Start-VM`), quarantines and replaces SSH credentials
-   through PowerShell Direct, connects the adapter
-   (`Connect-VMNetworkAdapter`), installs OpenSSH if needed, activates the
-   validated key-only configuration, then waits for SSH readiness.
-2. **Resolve**: Finds a running crabbox VM by lease ID, slug, or instance name.
-   Queries live VM state and IP from Hyper-V.
-   Plain and waiting status retain an existing SSH endpoint for acquired, running
-   leases. Status and controller observations never adopt a legacy claim or rewrite
+1. **Acquire**: Creates a per-lease differencing root disk and Generation 2 VM,
+   then follows the Windows PowerShell Direct bootstrap described above. Credential escrow
+   failure aborts acquisition and follows the normal `keep=true` preserve or
+   default VM/differencing-disk cleanup policy.
+2. **Resolve**: Finds a VM by lease ID, slug, or instance name and reports live
+   Hyper-V state. Reuse requires a live VM and an exact local claim; a recovered
+   legacy VM must be adopted with explicit `--reclaim`.
+   Status and controller observations never adopt legacy claims or rewrite
    local claim/key state; inactive or incomplete leases remain metadata-only.
    Plain status also remains metadata-only for legacy claims; endpoint access and
    heartbeat require an exactly bound claim or explicit reclaim through reuse.
-   The public `status --wait` command can separately renew an acquired lease
-   through the same guarded heartbeat path; plain status does not renew it.
-3. **List**: Lists all VMs with the `crabbox-` name prefix.
-4. **Release**: Stops the VM (`Stop-VM -Force`) and removes it
-   (`Remove-VM -Force`), then cleans up the provider-created VHDX file.
-5. **Cleanup**: Scans for stale `crabbox-` prefixed VMs and removes only VMs
-   bound to an exact expired local claim.
+   `status --wait` can separately renew an acquired lease through guarded
+   heartbeat; plain status does not renew it.
+3. **List**: Includes Hyper-V VMs referenced by local provider claims plus
+   unclaimed `crabbox-` prefixed candidates. A name prefix is inventory evidence,
+   not ownership proof.
+4. **Release**: Requires an exact local claim, performs guarded remote cleanup,
+   stops/removes the VM, and deletes VM-owned root and internal checkpoint
+   storage. Exported checkpoint artifacts survive release.
+5. **Cleanup**: Deletes only exact-claimed VMs whose state or expiry makes them
+   eligible, preserves `keep=true` and restore-reserved VMs, and prunes missing
+   local claims only after the provisioning grace period.
 
 Heartbeats require an exact instance-scoped claim for a completed acquisition.
 They atomically persist the touch timestamp and an explicit `--idle-timeout`
 override; omitting the flag preserves the recorded timeout, even when current
 configuration differs. Fresh status reads retain that policy and the original
 lease TTL cap. A stale snapshot or incomplete acquisition is not renewed.
-Ownership remains bound to the recorded VM name and instance scope, not a
-Hyper-V generation identifier.
+Ownership remains bound to the recorded VM name and instance scope. Existing checkpoint forks retain their checkpoint-specific identity and storage
+safeguards.
+
+Acquisition is bounded to 15 minutes, cleanup to 2 minutes, and ordinary host
+PowerShell commands to 45 seconds. Guest PowerShell Direct keeps its separate readiness and invocation
+budgets. Cancellation before key creation does not manufacture a retained
+lease. An ambiguous creation retains ownership and reports the blocked cleanup
+instead of detaching a replacement VM's disk.
 
 ## Notes
 
@@ -212,19 +391,26 @@ Hyper-V generation identifier.
 - The selected SSH account must be a local account name containing only letters,
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
+- Durable native-Windows GitHub Actions runner startup depends on the protected
+  credential escrow created during a fresh acquisition. Retained Windows leases
+  acquired by older Crabbox builds are not backfilled during resolve or
+  hydration; release and recreate them before using `--github-runner`.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
-  default. Only the provider-created boot disk is cleaned up on release; other
-  attached disks are preserved.
-- The SSH ready check uses the shared native-Windows readiness probe, which
-  verifies that `git`, `tar`, and the work root are available in the guest.
+  default. Only deterministically named provider-owned root and checkpoint
+  disks are cleaned up; unrelated attached disks are preserved.
+- The Windows ready check verifies `git`, `tar`, and the work root.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest
   interaction after bootstrap happens over SSH.
 
 ## Examples
 
+```powershell
+crabbox warmup --provider hyperv --target windows `
+  --hyperv-image C:\Images\win-server.vhdx
+crabbox run --provider hyperv --target windows -- powershell -Command "Get-Process"
+```
+
 ```sh
-crabbox warmup --provider hyperv --hyperv-image C:\Images\win-server.vhdx
-crabbox run --provider hyperv -- powershell -Command "Get-Process"
 crabbox ssh --provider hyperv
 crabbox stop --provider hyperv --id blue-lobster
 crabbox cleanup --provider hyperv

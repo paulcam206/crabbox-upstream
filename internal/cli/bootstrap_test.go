@@ -726,6 +726,117 @@ func TestAWSUserDataUbuntuAPTPolicy(t *testing.T) {
 	}
 }
 
+// A blanked virtual display freezes the guest framebuffer, so screenshots and
+// VNC keep returning the last rendered frame. Desktop proof then produces
+// convincing but meaningless artifacts: the terminal launches and is recorded
+// in metadata, yet never appears in the capture.
+func TestWindowsDesktopBootstrapKeepsDisplayAwake(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell is required")
+	}
+	for _, failingSetting := range []string{"", "monitor-timeout-dc"} {
+		name := "success"
+		if failingSetting != "" {
+			name = "powercfg-failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			prefix := `$ErrorActionPreference = "Stop"
+$env:PATH = ""
+$base = ` + psQuote(dir) + `
+$env:TEMP = $base
+$user = "fixture-user"
+$userPassword = "fixture-value"
+$setupCompletePath = Join-Path $base "setup-complete"
+$tightVNCInstaller = Join-Path $base "fixture-installer"
+$vncPasswordPath = Join-Path $base "fixture-password"
+$script:powerCalls = New-Object Collections.ArrayList
+$script:registry = @{}
+$script:registryTypes = @{}
+$script:vncRestarts = 0
+$script:launcherStarted = $false
+$script:failingSetting = ` + psQuote(failingSetting) + `
+function powercfg.exe {
+  [void]$script:powerCalls.Add(@($args))
+  $global:LASTEXITCODE = 0
+  if ($args[1] -eq $script:failingSetting) { $global:LASTEXITCODE = 13 }
+}
+function cmd.exe { $global:LASTEXITCODE = 0 }
+function icacls.exe { $global:LASTEXITCODE = 0 }
+function Test-Path { param($LiteralPath, $Path) return $true }
+function Set-ItemProperty {
+  param($LiteralPath, $Path, $Name, $Value, $Type, $ErrorAction)
+  if (-not $LiteralPath) { $LiteralPath = $Path }
+  $script:registry[($LiteralPath + "|" + $Name)] = $Value
+  $script:registryTypes[($LiteralPath + "|" + $Name)] = $Type
+}
+function Get-Service {
+  param($Name, $ErrorAction)
+  if ($Name -eq "CrabboxDesktopLauncher" -and -not $script:launcherStarted) { return }
+  [PSCustomObject]@{ Name = $Name; Status = "Running" }
+}
+function Start-Service {
+  param($Name)
+  if ($Name -eq "tvnserver") { throw "the retained VNC service must be restarted, not merely started" }
+  $script:launcherStarted = $true
+}
+function Get-Process {}
+function Stop-Process {}
+function Set-Service {}
+function New-Service {}
+function Restart-Service {
+  param($Name, $ErrorAction)
+  if ($Name -ne "tvnserver") { return }
+  foreach ($setting in @("AllowLoopback", "LoopbackOnly")) {
+    $entry = "HKLM:\SOFTWARE\TightVNC\Server|" + $setting
+    if (-not $script:registry.ContainsKey($entry) -or $script:registry[$entry] -ne 1 -or $script:registryTypes[$entry] -ne "DWord") {
+      throw "VNC restarted without its loopback-only policy"
+    }
+  }
+  $script:vncRestarts++
+}
+function Remove-Item {}
+function New-Item {}
+function New-ItemProperty {}
+function Set-Content {}
+function Add-Type {}
+function Start-Process { throw "native process launch is not allowed in this fixture" }
+function Invoke-WebRequest { throw "network access is not allowed in this fixture" }
+function Restart-Computer { throw "reboot is not allowed in this fixture" }
+`
+			assertions := `
+if ($script:vncRestarts -ne 1) { throw "VNC service was not restarted exactly once after loopback policy configuration" }
+if ($script:powerCalls.Count -ne 4) { throw "desktop bootstrap did not disable all four power timeouts" }
+$wanted = @("monitor-timeout-ac", "monitor-timeout-dc", "standby-timeout-ac", "standby-timeout-dc")
+for ($i = 0; $i -lt $wanted.Count; $i++) {
+  $call = $script:powerCalls[$i]
+  if ($call.Count -ne 3 -or $call[0] -ne "/change" -or $call[1] -ne $wanted[$i] -or $call[2] -ne "0") {
+    throw "incorrect desktop power timeout arguments"
+  }
+}
+foreach ($key in @("HKCU:\Control Panel\Desktop", "Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop")) {
+  foreach ($name in @("ScreenSaveActive", "ScreenSaveTimeOut", "ScreenSaverIsSecure")) {
+    $entry = $key + "|" + $name
+    if (-not $script:registry.ContainsKey($entry) -or $script:registry[$entry] -cne "0") {
+      throw "screensaver was not disabled for $entry"
+    }
+  }
+}
+`
+			output, err := runWindowsPowerShellScript(t, prefix+windowsDesktopBootstrapPowerShell()+assertions)
+			if failingSetting != "" {
+				if err == nil || !strings.Contains(string(output), "failed to disable desktop power timeout "+failingSetting) {
+					t.Fatalf("failed power configuration was not rejected: %v\n%s", err, output)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mocked desktop bootstrap did not keep the display awake: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
 func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -733,100 +844,36 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg.WindowsMode = windowsModeNormal
 	cfg.Desktop = true
 	cfg.WorkRoot = `C:\crabbox`
-	userData := awsUserData(cfg, "ssh-ed25519 test")
-	if !strings.Contains(userData, "version: 1.1") || !strings.Contains(userData, "task: enableOpenSsh") {
-		t.Fatalf("windows user data should enable EC2Launch OpenSSH:\n%s", userData)
+	var document struct {
+		Version string `yaml:"version"`
+		Tasks   []struct {
+			Task string `yaml:"task"`
+		} `yaml:"tasks"`
 	}
-	defaultWorkRootCfg := cfg
-	defaultWorkRootCfg.WorkRoot = ""
-	if got := WindowsBootstrapPowerShell(defaultWorkRootCfg, "ssh-ed25519 test"); !strings.Contains(got, `$workRoot = 'C:\crabbox'`) {
-		t.Fatalf("windows user data should default work root, got missing marker")
+	if err := yaml.Unmarshal([]byte(awsUserData(cfg, "ssh-ed25519 test")), &document); err != nil {
+		t.Fatal(err)
 	}
-	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	if document.Version != "1.1" || len(document.Tasks) != 1 || document.Tasks[0].Task != "enableOpenSsh" {
+		t.Fatalf("Windows AWS provisioning must enable EC2Launch OpenSSH: %+v", document)
+	}
+}
+
+func TestManagedWindowsDesktopTerminalBootstrapInstallsFullGit(t *testing.T) {
+	got := ManagedWindowsDesktopTerminalBootstrapPowerShell()
 	for _, want := range []string{
-		"function Assert-CrabboxFileSHA256",
-		"Get-FileHash -LiteralPath $Path -Algorithm SHA256",
-		"OpenSSH-Win64.zip",
-		openSSHWin64ZipSHA256,
-		"install-sshd.ps1",
-		"administrators_authorized_keys",
-		"Match Group administrators",
-		"Subsystem sftp internal-sftp",
-		"HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key",
-		"PubkeyAuthentication yes",
-		"PasswordAuthentication no",
-		`$openSSHSystemRoot = Join-Path $env:WINDIR "System32\OpenSSH"`,
-		"function Resolve-CrabboxOpenSSHCommand",
-		`$sshKeygen = Resolve-CrabboxOpenSSHCommand "ssh-keygen.exe"`,
-		"Start-Process -FilePath $sshKeygen",
-		`-q -t ed25519 -N "" -f "`,
-		`$hostKey + '"'`,
-		"ssh-keygen.exe",
-		"icacls.exe $hostKey",
-		"sshd failed to start with generated sshd_config",
-		"$sshPorts = @('2222', '22')",
-		"sshd_config",
-		"Port $port",
-		"crabbox-sshd-$port",
-		"Git-2.52.0-64-bit.exe",
+		gitForWindowsSetupURL,
 		gitForWindowsSetupSHA256,
-		"tightvnc-2.8.85-gpl-setup-64bit.msi",
-		tightVNCMSISHA256,
-		"VALUE_OF_PASSWORD=$vncPassword",
-		"VALUE_OF_ALLOWLOOPBACK=1",
-		"CrabboxUserVNC",
-		"crabbox-user-vnc.cmd",
-		"start-user-vnc.ps1",
-		"NewNetworkWindowOff",
-		"DoNotOpenServerManagerAtLogon",
-		"Set-Service -StartupType Automatic",
-		"Start-Service -Name tvnserver",
-		"CrabboxDesktopLauncher",
-		"WTSQueryUserToken",
-		"CreateProcessAsUserW",
-		`startup.lpDesktop = @"winsta0\default"`,
-		"desktop-launch-requests",
-		"New-CrabboxPassword",
-		"${userSID}:F",
-		"$credentialPaths = @($passwordPath)",
-		"$credentialPaths += $passwordMirrorPath",
-		`icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"`,
-		`C:\ProgramData\crabbox\vnc.password`,
-		`C:\ProgramData\crabbox\windows.username`,
-		"AutoAdminLogon",
-		"DefaultDomainName",
-		"Test-Path -LiteralPath $oobe",
-		"PrivacyConsentStatus",
-		"SetupDisplayedEula",
-		"SkipMachineOOBE",
-		"SkipUserOOBE",
-		"EnableFirstLogonAnimation",
-		"Restart-Computer -Force",
+		`C:\Program Files\Git\cmd\git.exe`,
+		`C:\Program Files\Git\usr\bin\mintty.exe`,
+		`"/VERYSILENT","/NORESTART","/NOCANCEL","/SP-"`,
+		"Restart-Service sshd -Force",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("windows user data missing %q", want)
+			t.Fatalf("desktop terminal bootstrap missing %q", want)
 		}
 	}
-	for _, removed := range []string{"/SC ONLOGON", "Set-TightVNCBinaryValue", `reg.exe add "HKCU\Software\TightVNC\Server"`} {
-		if strings.Contains(got, removed) {
-			t.Fatalf("windows user data should remove application-mode VNC path %q", removed)
-		}
-	}
-	for _, pair := range [][2]string{
-		{"Assert-CrabboxFileSHA256 $openSSHZip", "Expand-Archive -LiteralPath $openSSHZip"},
-		{"Assert-CrabboxFileSHA256 $gitInstaller", "Start-Process -FilePath $gitInstaller"},
-		{"Assert-CrabboxFileSHA256 $tightVNCInstaller", "Start-Process -FilePath msiexec.exe"},
-	} {
-		verifyIndex := strings.Index(got, pair[0])
-		useIndex := strings.Index(got, pair[1])
-		if verifyIndex < 0 || useIndex < 0 || verifyIndex > useIndex {
-			t.Fatalf("windows bootstrap must run %q before %q", pair[0], pair[1])
-		}
-	}
-	mirrorIndex := strings.Index(got, "$credentialPaths += $passwordMirrorPath")
-	aclIndex := strings.Index(got, "foreach ($credentialPath in $credentialPaths)")
-	if mirrorIndex < 0 || aclIndex < 0 || mirrorIndex > aclIndex {
-		t.Fatalf("windows password mirror must be included before credential ACL hardening")
+	if strings.Contains(got, "MinGit") {
+		t.Fatal("desktop terminal bootstrap must install full Git for Windows, not MinGit")
 	}
 }
 

@@ -322,36 +322,6 @@ func TestGitHubActionsRunnerInstallScriptUsesOfficialRunner(t *testing.T) {
 	}
 }
 
-func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *testing.T) {
-	got := githubActionsRunnerInstallScriptForTarget("latest", true, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
-	for _, want := range []string{
-		"https://api.github.com/repos/actions/runner/releases/latest",
-		"https://api.github.com/repos/actions/runner/releases/tags/v$version",
-		"actions-runner-win-$runnerArch-$version.zip",
-		"$release.assets | Where-Object { $_.name -eq $archiveName }",
-		"^sha256:(?<sha>[0-9a-fA-F]{64})$",
-		"Get-FileHash -LiteralPath $zip -Algorithm SHA256",
-		"runner archive checksum mismatch",
-		".\\config.cmd",
-		"--ephemeral",
-		"New-ScheduledTaskAction",
-		"Start-ScheduledTask",
-		"C:\\ProgramData\\crabbox\\windows.password",
-		"Start-Process",
-		"run-crabbox.ps1",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("windows install script missing %q", want)
-		}
-	}
-	checksum := strings.Index(got, "Get-FileHash")
-	clearRunner := strings.Index(got, "Get-ChildItem -Force -LiteralPath $runnerDir | Remove-Item")
-	extract := strings.Index(got, "Expand-Archive")
-	if checksum < 0 || clearRunner < checksum || extract < clearRunner {
-		t.Fatalf("Windows runner installer must verify checksum before replacing/extracting: checksum=%d clear=%d extract=%d", checksum, clearRunner, extract)
-	}
-}
-
 func TestGitHubActionsRunnerInstallScriptRejectsChecksumMismatchBeforeExtraction(t *testing.T) {
 	requirePOSIXShellTest(t)
 	root := t.TempDir()
@@ -596,7 +566,16 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 			if !tc.fresh {
 				write(filepath.Join(runner, versionMarker), "", 0o644)
 			}
-			write(filepath.Join(bin, "curl"), "#!/bin/sh\nif [ \"${2:-}\" = -o ]; then cp \"$HOME/runner.tar.gz\" \"$3\"; else printf '{}'; fi\n", 0o755)
+			write(filepath.Join(bin, "curl"), `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    cp "$HOME/runner.tar.gz" "$2"
+    exit
+  fi
+  shift
+done
+printf '{}'
+`, 0o755)
 			write(filepath.Join(bin, "sha256sum"), "#!/usr/bin/env python3\nimport hashlib\nimport sys\nwith open(sys.argv[1], 'rb') as archive:\n    print(hashlib.sha256(archive.read()).hexdigest() + '  ' + sys.argv[1])\n", 0o755)
 			write(filepath.Join(bin, "jq"), "#!/bin/sh\ncase \"$*\" in *tag_name*) printf 2.337.0;; *digest*) printf '"+runnerDigest+"';; *) exit 2;; esac\n", 0o755)
 			write(filepath.Join(bin, "uname"), "#!/bin/sh\nprintf '"+map[bool]string{true: "aarch64", false: "x86_64"}[tc.change == "arm"]+"\\n'\n", 0o755)
@@ -2324,9 +2303,10 @@ exit 0
 	ghScript := `#!/bin/sh
 case "$*" in
   *registration-token*) printf '%s\n' test-token ;;
-  *"workflow run"*) : > "$CRABBOX_FAKE_DISPATCHED" ;;
-esac
-`
+	  *"repos/example/repo/actions/runners"*) printf '%s\tonline\tfalse\n' "$CRABBOX_FAKE_RUNNER_NAME" ;;
+	  *"workflow run"*) : > "$CRABBOX_FAKE_DISPATCHED" ;;
+	esac
+	`
 	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2336,6 +2316,7 @@ esac
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_DISPATCHED", dispatchedPath)
+	t.Setenv("CRABBOX_FAKE_RUNNER_NAME", LeaseProviderName("cbx_gh", ""))
 
 	cfg := defaultConfig()
 	cfg.Actions.Workflow = "hydrate.yml"

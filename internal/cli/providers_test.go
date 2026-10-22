@@ -648,6 +648,41 @@ func TestProvidersCommandFiltersRequireAllCapabilities(t *testing.T) {
 	}
 }
 
+func TestProviderFiltersRespectTargetFeatureOverrides(t *testing.T) {
+	entry := providerMatrixEntry{
+		Targets:  []string{TargetLinux, TargetWindows + "/" + WindowsModeNormal},
+		Features: []Feature{FeatureSSH, FeatureCheckpoint},
+		TargetFeatures: []providerTargetFeatureEntry{
+			{Target: TargetLinux, Features: []Feature{FeatureSSH}},
+		},
+	}
+
+	if providerEntryMatchesFilters(entry, providerMatrixFilters{
+		Targets:  []string{TargetLinux},
+		Features: []string{string(FeatureCheckpoint)},
+	}) {
+		t.Fatal("Linux target matched a Windows-only checkpoint feature")
+	}
+	if providerEntryMatchesFilters(entry, providerMatrixFilters{
+		Targets:    []string{TargetLinux},
+		Workspaces: []string{"checkpoint"},
+	}) {
+		t.Fatal("Linux target matched a Windows-only checkpoint workspace capability")
+	}
+	if !providerEntryMatchesFilters(entry, providerMatrixFilters{
+		Targets:  []string{TargetWindows + "/" + WindowsModeNormal},
+		Features: []string{string(FeatureCheckpoint)},
+	}) {
+		t.Fatal("Windows target did not inherit provider checkpoint feature")
+	}
+	if !providerEntryMatchesFilters(entry, providerMatrixFilters{
+		Targets:    []string{TargetWindows + "/" + WindowsModeNormal},
+		Workspaces: []string{"checkpoint"},
+	}) {
+		t.Fatal("Windows target did not inherit provider checkpoint workspace capability")
+	}
+}
+
 func TestProvidersCommandRejectsUnknownFilter(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"--runtime", "microvm-fork"})
@@ -1206,7 +1241,7 @@ func TestProvidersRecommendFanoutTestingRequiresForkableWorkspaces(t *testing.T)
 	if len(recommendations) == 0 {
 		t.Fatal("expected fanout-testing recommendations")
 	}
-	if recommendations[0].Provider != "parallels" {
+	if recommendations[0].Provider != "hyperv" {
 		t.Fatalf("top fanout-testing provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
 	}
 	foundLocalContainer := false
@@ -1489,7 +1524,7 @@ func TestProvidersRecommendVersionedWorkspace(t *testing.T) {
 	if len(recommendations) == 0 {
 		t.Fatal("expected versioned-workspace recommendations")
 	}
-	if recommendations[0].Provider != "parallels" {
+	if recommendations[0].Provider != "hyperv" {
 		t.Fatalf("top versioned-workspace provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
 	}
 	for _, capability := range []string{"checkpoint", "fork", "restore", "snapshot-ref"} {

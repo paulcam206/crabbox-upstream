@@ -479,11 +479,11 @@ func azureWindowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	if cfg.Desktop {
 		setupComplete = ""
 	}
-	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + `
-$passwordPath = Join-Path $base "windows.password"
+	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + fmt.Sprintf(`
+$passwordPath = %s
 $usernamePath = Join-Path $base "windows.username"
 $passwordMirrorPath = $null
-` + sharedWindowsCore() + `
+`, psQuote(WindowsActionsRunnerCredentialPath)) + sharedWindowsCore() + `
 git --version | Out-Null
 tar --version | Out-Null
 ` + setupComplete + `
@@ -1077,4 +1077,95 @@ func XfceDesktopSessionScript() string {
 
 func GnomeDesktopThemeScript() string {
 	return sharedGnomeDesktopTheme()
+}
+
+func managedWindowsDesktopBootstrapPowerShell(user string) string {
+	return `param([string]$userPassword)
+` + windowsBootstrapUtilitiesPowerShell() + `
+$user = ` + psQuote(user) + `
+$base = "C:\ProgramData\crabbox"
+$setupCompletePath = Join-Path $base "desktop-setup-complete"
+$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
+$tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+if ([string]::IsNullOrWhiteSpace($userPassword)) {
+  throw "managed Windows desktop bootstrap requires the guest password"
+}
+if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+  throw "managed Windows desktop user was not found: $user"
+}
+if (-not (Test-Path -LiteralPath $vncPasswordPath)) {
+  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
+}
+$vncPassword = (Get-Content -Raw -Path $vncPasswordPath).Trim()
+if ($vncPassword.Length -lt 12 -or $vncPassword -notmatch '[A-Z]' -or $vncPassword -notmatch '[a-z]' -or $vncPassword -notmatch '[0-9]' -or $vncPassword -notmatch '[^A-Za-z0-9]') {
+  $vncPassword = New-CrabboxPassword
+  Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath -Value $vncPassword
+}
+$userSID = (Get-LocalUser -Name $user).SID.Value
+icacls.exe $vncPasswordPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+` + windowsDesktopBootstrapPowerShell()
+}
+
+func managedWindowsDesktopTerminalBootstrapPowerShell() string {
+	return `$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$gitInstaller = Join-Path $env:TEMP "crabbox-git-for-windows.exe"
+$git = "C:\Program Files\Git\cmd\git.exe"
+$mintty = "C:\Program Files\Git\usr\bin\mintty.exe"
+function Invoke-CrabboxDesktopDownload {
+  for ($attempt = 1; $attempt -le 8; $attempt++) {
+    try {
+      Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing
+      return
+    } catch {
+      if ($attempt -eq 8) { throw }
+      Start-Sleep -Seconds ($attempt * 5)
+    }
+  }
+}
+if (-not (Test-Path -LiteralPath $git) -or -not (Test-Path -LiteralPath $mintty)) {
+  Invoke-CrabboxDesktopDownload
+  $actual = (Get-FileHash -LiteralPath $gitInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne ` + psQuote(gitForWindowsSetupSHA256) + `) {
+    Remove-Item -Force -LiteralPath $gitInstaller -ErrorAction SilentlyContinue
+    throw "Git for Windows SHA-256 mismatch"
+  }
+  try {
+    $process = Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -PassThru -Wait
+    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+      throw "Git for Windows install failed with exit $($process.ExitCode)"
+    }
+  } finally {
+    Remove-Item -Force -LiteralPath $gitInstaller -ErrorAction SilentlyContinue
+  }
+}
+if (-not (Test-Path -LiteralPath $git) -or -not (Test-Path -LiteralPath $mintty)) {
+  throw "Git for Windows desktop terminal is unavailable after install"
+}
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+foreach ($path in @("C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
+  if ($machinePath -notlike "*$path*") { $machinePath = "$machinePath;$path" }
+  if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
+}
+[Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+Restart-Service sshd -Force
+Write-Output "GIT=$git"
+Write-Output "MINTTY=$mintty"
+`
+}
+
+// WindowsNodeBaselinePowerShell installs and verifies the shared native Windows
+// Node/npm baseline (the same recipe the generic Windows bootstrap runs).
+func WindowsNodeBaselinePowerShell() string {
+	return `
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+` + windowsBootstrapUtilitiesPowerShell() + sharedWindowsNodeInstall()
+}
+
+func windowsBootstrapUtilitiesPowerShell() string {
+	return sharedWindowsUtilities()
 }

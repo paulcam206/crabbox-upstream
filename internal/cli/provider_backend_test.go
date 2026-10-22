@@ -1580,6 +1580,72 @@ func TestValidateRequestedCapabilitiesUsesProviderSpec(t *testing.T) {
 	}
 }
 
+type targetFeatureTestProvider struct {
+	Provider
+	spec ProviderSpec
+}
+
+func (p targetFeatureTestProvider) Spec() ProviderSpec { return p.spec }
+
+func TestProviderFeaturesForConfigUsesTargetOverrides(t *testing.T) {
+	spec := ProviderSpec{
+		Features: FeatureSet{FeatureSSH},
+		TargetFeatures: map[string]FeatureSet{
+			TargetLinux:                             FeatureSet{FeatureSSH, FeatureCode},
+			TargetWindows + "/" + WindowsModeNormal: FeatureSet{FeatureSSH, FeatureDesktop},
+		},
+	}
+	provider := targetFeatureTestProvider{spec: spec}
+	for _, tc := range []struct {
+		target, mode string
+		want         FeatureSet
+	}{
+		{TargetLinux, "", FeatureSet{FeatureSSH, FeatureCode}},
+		{TargetWindows, WindowsModeNormal, FeatureSet{FeatureSSH, FeatureDesktop}},
+		{TargetMacOS, "", FeatureSet{FeatureSSH}},
+	} {
+		cfg := Config{TargetOS: tc.target, WindowsMode: tc.mode}
+		if got := ProviderFeaturesForConfig(provider, cfg); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("target=%s mode=%s features=%v want=%v", tc.target, tc.mode, got, tc.want)
+		}
+	}
+}
+
+func TestProviderSpecFeaturesForTarget(t *testing.T) {
+	common := FeatureSet{FeatureSSH, FeatureCleanup}
+	linux := FeatureSet{FeatureSSH, FeatureCleanup, FeatureCode}
+	windows := FeatureSet{FeatureSSH, FeatureCleanup, FeatureCheckpoint}
+	spec := ProviderSpec{
+		Features: common,
+		Targets: []TargetSpec{
+			{OS: TargetLinux},
+			{OS: TargetWindows, WindowsMode: WindowsModeNormal},
+		},
+		TargetFeatures: map[string]FeatureSet{
+			TargetLinux:                             linux,
+			TargetWindows + "/" + WindowsModeNormal: windows,
+		},
+	}
+
+	for _, mode := range []string{"", WindowsModeNormal} {
+		if got := spec.FeaturesForTarget(TargetLinux, mode); !reflect.DeepEqual(got, linux) {
+			t.Fatalf("linux mode=%q features=%v want %v", mode, got, linux)
+		}
+	}
+	if got := spec.FeaturesForTarget(TargetWindows, WindowsModeNormal); !reflect.DeepEqual(got, windows) {
+		t.Fatalf("windows features=%v want %v", got, windows)
+	}
+	if got := spec.FeaturesForTarget(TargetMacOS, ""); !reflect.DeepEqual(got, common) {
+		t.Fatalf("unknown target features=%v want provider features %v", got, common)
+	}
+
+	got := spec.FeaturesForTarget(TargetLinux, "")
+	got[0] = FeatureBrowser
+	if spec.TargetFeatures[TargetLinux][0] != FeatureSSH {
+		t.Fatalf("FeaturesForTarget returned mutable provider metadata: %v", spec.TargetFeatures[TargetLinux])
+	}
+}
+
 func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	spec := ProviderSpec{Name: "modal", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureArchiveSync}}
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{SyncOnly: true}); err != nil {
