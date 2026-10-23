@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -83,8 +84,36 @@ func bindActionsWorkspaceClaim(ctx context.Context, target SSHTarget, repo Repo,
 	}
 	replacement := cloneLeaseClaim(claim)
 	replacement.ActionsWorkspace = &ActionsWorkspaceBinding{Origin: origin, MarkerFingerprint: actionsWorkspaceMarkerFingerprint(state)}
-	_, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, claim.LeaseID, claim, replacement)
-	return err
+	base := claim
+	for attempt := 0; ; attempt++ {
+		_, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, base.LeaseID, base, replacement)
+		if err == nil || attempt >= 3 {
+			return err
+		}
+		latest, present, readErr := ReadLeaseClaimWithPresence(base.LeaseID)
+		if readErr != nil || !present || !actionsClaimLifecycleOnlyChange(base, latest) {
+			return err
+		}
+		base = latest
+		replacement = cloneLeaseClaim(latest)
+		replacement.ActionsWorkspace = &ActionsWorkspaceBinding{Origin: origin, MarkerFingerprint: actionsWorkspaceMarkerFingerprint(state)}
+	}
+}
+
+// actionsClaimLifecycleOnlyChange reports whether current differs from
+// captured only by the labels and a newer last-use time that a heartbeat
+// publishes together.
+func actionsClaimLifecycleOnlyChange(captured, current leaseClaim) bool {
+	capturedUsed, capturedErr := time.Parse(time.RFC3339, captured.LastUsedAt)
+	currentUsed, currentErr := time.Parse(time.RFC3339, current.LastUsedAt)
+	if capturedErr != nil || currentErr != nil || !currentUsed.After(capturedUsed) {
+		return false
+	}
+	normalized := cloneLeaseClaim(current)
+	normalized.Labels = captured.Labels
+	normalized.LastUsedAt = captured.LastUsedAt
+	normalized.Revision = captured.Revision
+	return reflect.DeepEqual(normalized, captured)
 }
 
 func readActionsWorkspaceState(ctx context.Context, target SSHTarget, leaseID string) (actionsHydrationState, error) {

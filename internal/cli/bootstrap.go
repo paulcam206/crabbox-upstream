@@ -479,11 +479,11 @@ func azureWindowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	if cfg.Desktop {
 		setupComplete = ""
 	}
-	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + `
-$passwordPath = Join-Path $base "windows.password"
+	return windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) + fmt.Sprintf(`
+$passwordPath = %s
 $usernamePath = Join-Path $base "windows.username"
 $passwordMirrorPath = $null
-` + sharedWindowsCore() + `
+`, psQuote(WindowsActionsRunnerCredentialPath)) + sharedWindowsCore() + `
 git --version | Out-Null
 tar --version | Out-Null
 ` + setupComplete + `
@@ -1077,4 +1077,18 @@ func XfceDesktopSessionScript() string {
 
 func GnomeDesktopThemeScript() string {
 	return sharedGnomeDesktopTheme()
+}
+
+// WindowsNodeBaselinePowerShell installs and verifies the shared native Windows
+// Node/npm baseline (the same recipe the generic Windows bootstrap runs).
+func WindowsNodeBaselinePowerShell() string {
+	return `
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+` + windowsBootstrapUtilitiesPowerShell() + sharedWindowsNodeInstall()
+}
+
+func windowsBootstrapUtilitiesPowerShell() string {
+	return sharedWindowsUtilities()
 }

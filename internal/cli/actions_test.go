@@ -595,7 +595,7 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 			if !tc.fresh {
 				write(filepath.Join(runner, versionMarker), "", 0o644)
 			}
-			write(filepath.Join(bin, "curl"), "#!/bin/sh\nif [ \"${2:-}\" = -o ]; then cp \"$HOME/runner.tar.gz\" \"$3\"; else printf '{}'; fi\n", 0o755)
+			write(filepath.Join(bin, "curl"), "#!/bin/sh\nout=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then shift; out=\"$1\"; fi\n  shift\ndone\nif [ -n \"$out\" ]; then cp \"$HOME/runner.tar.gz\" \"$out\"; else printf '{}'; fi\n", 0o755)
 			write(filepath.Join(bin, "sha256sum"), "#!/usr/bin/env python3\nimport hashlib\nimport sys\nwith open(sys.argv[1], 'rb') as archive:\n    print(hashlib.sha256(archive.read()).hexdigest() + '  ' + sys.argv[1])\n", 0o755)
 			write(filepath.Join(bin, "jq"), "#!/bin/sh\ncase \"$*\" in *tag_name*) printf 2.337.0;; *digest*) printf '"+runnerDigest+"';; *) exit 2;; esac\n", 0o755)
 			write(filepath.Join(bin, "uname"), "#!/bin/sh\nprintf '"+map[bool]string{true: "aarch64", false: "x86_64"}[tc.change == "arm"]+"\\n'\n", 0o755)
@@ -2322,6 +2322,7 @@ exit 0
 	ghScript := `#!/bin/sh
 case "$*" in
   *registration-token*) printf '%s\n' test-token ;;
+  *"actions/runners?per_page"*) printf 'crabbox-cbx-gh\tonline\tfalse\n' ;;
   *"workflow run"*) : > "$CRABBOX_FAKE_DISPATCHED" ;;
 esac
 `
