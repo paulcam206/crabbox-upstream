@@ -160,6 +160,16 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if req.RequestedLeaseID != "" || req.RequestedCheckpointID != "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s does not support requested fixed lease or checkpoint IDs", providerName)
 	}
+	if req.CheckpointSource != nil {
+		return b.ForkNativeCheckpoint(ctx, core.NativeCheckpointForkLifecycleRequest{
+			Record:        *req.CheckpointSource,
+			Repo:          req.Repo,
+			Keep:          req.Keep,
+			Reclaim:       req.Reclaim,
+			RequestedSlug: req.RequestedSlug,
+			OnAcquired:    req.OnAcquired,
+		})
+	}
 	// Sizing applies only to creation; existing leases must remain recoverable.
 	if b.cfg.HyperV.CPUs < 0 {
 		return core.LeaseTarget{}, core.Exit(2, "hyperv.cpus must be zero or greater")
@@ -1216,6 +1226,19 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst hyperv
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
 }
 
+func applyStoredLeaseKey(cfg *core.Config, leaseID string) {
+	if cfg == nil || strings.TrimSpace(leaseID) == "" {
+		return
+	}
+	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		cfg.SSHKey = keyPath
+	}
+}
+
 func (b *backend) removeVM(ctx context.Context, name string) error {
 	if !validHyperVVMName(name) {
 		return core.Exit(2, "refusing to remove non-Crabbox Hyper-V VM %q", name)
@@ -1255,7 +1278,7 @@ func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
 		if strings.EqualFold(clean, filepath.Clean(expectedVHD)) {
 			continue
 		}
-		if ownedHyperVCheckpoint(clean, vhdDir, name) {
+		if ownedHyperVCheckpoint(clean, vhdDir, name) || ownedHyperVForkDisk(clean, vhdDir, name) {
 			if err := b.removeVHDFile(p); err != nil {
 				errs = append(errs, err)
 			}
@@ -1292,6 +1315,13 @@ func validHyperVVMName(name string) bool {
 		}
 	}
 	return name[len(name)-1] != '-'
+}
+
+// ownedHyperVForkDisk reports whether an attached virtual disk lives directly
+// in the lease's own VHD directory, where Import-VM -Copy places fork disks.
+func ownedHyperVForkDisk(path, vhdDir, name string) bool {
+	clean := filepath.Clean(path)
+	return isVirtualDiskFile(clean) && strings.EqualFold(filepath.Dir(clean), filepath.Join(filepath.Clean(vhdDir), name))
 }
 
 func ownedHyperVCheckpoint(path, vhdDir, name string) bool {
@@ -1500,6 +1530,15 @@ func (b *backend) powershell(ctx context.Context, script string) (core.LocalComm
 	})
 }
 
+// powershellLong runs host operations such as checkpoint export or restore whose
+// duration scales with disk size, bounded only by the caller's context.
+func (b *backend) powershellLong(ctx context.Context, script string) (core.LocalCommandResult, error) {
+	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name: "powershell",
+		Args: []string{"-NoProfile", "-NonInteractive", "-Command", script},
+	})
+}
+
 func (b *backend) powershellWithEnv(ctx context.Context, script string, env []string) (core.LocalCommandResult, error) {
 	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: "powershell",
@@ -1554,6 +1593,11 @@ func missingClaimCleanupReady(claim core.LeaseClaim, now time.Time) (bool, strin
 func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
+	}
+	if display := core.LeaseLabelTimeDisplay(server.Labels[hypervCheckpointRestoreReservationLabel]); display != "" {
+		if reservedUntil, err := time.Parse(time.RFC3339, display); err == nil && now.Before(reservedUntil) {
+			return false, "checkpoint restore reserved"
+		}
 	}
 	if !hasClaim {
 		return false, "missing claim"

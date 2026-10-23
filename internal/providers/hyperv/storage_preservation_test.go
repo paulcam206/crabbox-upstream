@@ -36,6 +36,33 @@ func TestRemoveVMStoragePreservesUnrelatedFilesInVMNamedDirectory(t *testing.T) 
 	}
 }
 
+func TestRemoveVMStorageRemovesAttachedForkDisksButKeepsUnattachedFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("USERPROFILE", root)
+	const name = "crabbox-storage-9abc"
+	leaseDir := filepath.Join(hypervVHDDir(), name)
+	if err := os.MkdirAll(leaseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	attached := filepath.Join(leaseDir, "copied-system.vhdx")
+	unattached := filepath.Join(leaseDir, "operator-data.vhdx")
+	for _, path := range []string{attached, unattached} {
+		if err := os.WriteFile(path, []byte("disk"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := testBackend(&recordingRunner{}).removeVMStorage(name, []string{attached}); err != nil {
+		t.Fatalf("removeVMStorage: %v", err)
+	}
+	if _, err := os.Stat(attached); !os.IsNotExist(err) {
+		t.Fatalf("attached fork disk still present: %v", err)
+	}
+	if _, err := os.Stat(unattached); err != nil {
+		t.Fatalf("unattached file was removed: %v", err)
+	}
+}
+
 func TestRemoveVMStorageRemovesEmptyVMNamedDirectory(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)

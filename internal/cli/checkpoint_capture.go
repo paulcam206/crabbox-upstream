@@ -561,5 +561,5 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 }
 
 func unresolvedCheckpoint(record checkpointRecord) bool {
-	return isNativeCheckpointKind(record.Kind) && (record.Capture != nil && record.Capture.Phase != "retired" || strings.TrimSpace(record.nativeDeleteID()) == "")
+	return isNativeCheckpointKind(record.Kind) && (record.Capture != nil && record.Capture.Phase != "retired" || strings.TrimSpace(record.nativeDeleteID()) == "" || strings.EqualFold(strings.TrimSpace(record.Native.State), "creating"))
 }
