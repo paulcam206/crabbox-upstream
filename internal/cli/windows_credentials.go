@@ -14,10 +14,6 @@ func windowsScreenshotCredentialReadPowerShell(path string) string {
 	return windowsCredentialReadPowerShell(path, "Windows screenshot", true)
 }
 
-func windowsVideoCredentialReadPowerShell(path string) string {
-	return windowsCredentialReadPowerShell(path, "Windows video", true)
-}
-
 func windowsCredentialReadPowerShell(path, label string, required bool) string {
 	missing := "$logonValue = $null"
 	if required {

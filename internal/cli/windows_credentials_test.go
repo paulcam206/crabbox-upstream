@@ -90,7 +90,6 @@ func TestWindowsCredentialReadersPreserveExactUTF8(t *testing.T) {
 	readers := map[string]func(string) string{
 		"runner":     windowsRunnerCredentialReadPowerShell,
 		"screenshot": windowsScreenshotCredentialReadPowerShell,
-		"video":      windowsVideoCredentialReadPowerShell,
 	}
 	for credentialName, credential := range credentials {
 		for readerName, reader := range readers {
@@ -130,7 +129,6 @@ func TestWindowsCredentialReadersRejectZeroLength(t *testing.T) {
 	readers := map[string]func(string) string{
 		"runner":     windowsRunnerCredentialReadPowerShell,
 		"screenshot": windowsScreenshotCredentialReadPowerShell,
-		"video":      windowsVideoCredentialReadPowerShell,
 	}
 	for name, reader := range readers {
 		t.Run(name, func(t *testing.T) {

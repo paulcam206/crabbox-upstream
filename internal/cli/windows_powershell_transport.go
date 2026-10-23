@@ -20,8 +20,17 @@ func windowsScriptNeedsFileTransport(script string) bool {
 }
 
 type windowsScriptTransport struct {
-	run  func(context.Context, SSHTarget, string, io.Reader, io.Writer, io.Writer) error
-	copy func(context.Context, SSHTarget, string, string) error
+	run       func(context.Context, SSHTarget, string, io.Reader, io.Writer, io.Writer) error
+	copy      func(context.Context, SSHTarget, string, string) error
+	rawStdout bool
+}
+
+func runWindowsPowerShellScriptToWriter(ctx context.Context, target SSHTarget, script string, stdout io.Writer) error {
+	return (windowsScriptTransport{run: runSSHInput, copy: copyLocalFileToTarget, rawStdout: true}).execute(ctx, target, script, stdout, nil)
+}
+
+func runGuestWindowsPowerShellScript(ctx context.Context, target SSHTarget, script string, stdout, stderr io.Writer) error {
+	return (windowsScriptTransport{run: runSSHInput, copy: copyLocalFileToTarget}).execute(ctx, target, script, stdout, stderr)
 }
 
 func (transport windowsScriptTransport) execute(ctx context.Context, target SSHTarget, script string, stdout, stderr io.Writer) (result error) {
@@ -38,7 +47,11 @@ func (transport windowsScriptTransport) execute(ctx context.Context, target SSHT
 		}
 	}()
 	if !windowsScriptNeedsFileTransport(script) {
-		return transport.run(ctx, target, windowsPowerShellStdinScriptCommand(len(script)), strings.NewReader(script), stdout, errWriter)
+		stdinCommand := windowsPowerShellStdinScriptCommand(len(script))
+		if transport.rawStdout {
+			stdinCommand = windowsPowerShellRawStdoutStdinScriptCommand(len(script))
+		}
+		return transport.run(ctx, target, stdinCommand, strings.NewReader(script), stdout, errWriter)
 	}
 
 	localDir, err := os.MkdirTemp("", "crabbox-windows-script-")
@@ -78,8 +91,16 @@ Protect-CrabboxInteractiveDirectory ` + psQuote(remoteDir))
 	if err := transport.copy(ctx, target, localScript, remoteScript); err != nil {
 		return fmt.Errorf("copy Windows script: %w", err)
 	}
-	command := PowershellCommand(`$ErrorActionPreference = "Stop"
+	command := windowsPowerShellFileCommand(remoteScript, transport.rawStdout)
+	return transport.run(ctx, target, command, nil, stdout, errWriter)
+}
+
+func windowsPowerShellFileCommand(remoteScript string, rawStdout bool) string {
+	if !rawStdout {
+		return PowershellCommand(`$ErrorActionPreference = "Stop"
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ` + psQuote(remoteScript) + `
 exit $LASTEXITCODE`)
-	return transport.run(ctx, target, command, nil, stdout, errWriter)
+	}
+	return PowershellCommand(windowsPowerShellRawFileInvoker + `$ErrorActionPreference = "Stop"
+exit (Invoke-CrabboxRawPowerShellFile ` + psQuote(remoteScript) + `)`)
 }

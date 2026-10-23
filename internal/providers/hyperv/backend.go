@@ -30,22 +30,25 @@ type backend struct {
 	// blocked probe is killed and retried (proven not to corrupt the guest
 	// session), and guestInvokeTimeout bounds each real guest call so a wedged
 	// mid-session call cannot hang the provision forever. Overridable in tests.
-	guestReadyProbeTimeout time.Duration
-	guestReadyBudget       time.Duration
-	guestInvokeTimeout     time.Duration
-	guestRetryBackoff      time.Duration
-	sshReady               func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
-	resumeSSHProbeTimeout  time.Duration
-	resumeIPStableWindow   time.Duration
-	resumePollInterval     time.Duration
-	ensureLeaseKey         func(core.Config, string) (string, string, error)
-	runSSHOutput           func(context.Context, core.SSHTarget, string) (string, error)
-	acquireBudget          time.Duration
-	cleanupBudget          time.Duration
-	hostCommandTimeout     time.Duration
-	startVMTimeout         time.Duration
-	now                    func() time.Time
-	sleep                  func(context.Context, time.Duration) error
+	guestReadyProbeTimeout    time.Duration
+	guestReadyBudget          time.Duration
+	guestInvokeTimeout        time.Duration
+	guestRetryBackoff         time.Duration
+	sshReady                  func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	resumeSSHProbeTimeout     time.Duration
+	resumeIPStableWindow      time.Duration
+	resumePollInterval        time.Duration
+	waitWindowsVNC            func(context.Context, *core.SSHTarget, io.Writer, time.Duration) error
+	waitWindowsDesktopSession func(context.Context, string, string, time.Duration) error
+	waitWindowsSSHStable      func(context.Context, *core.SSHTarget, io.Writer, time.Duration) error
+	ensureLeaseKey            func(core.Config, string) (string, string, error)
+	runSSHOutput              func(context.Context, core.SSHTarget, string) (string, error)
+	acquireBudget             time.Duration
+	cleanupBudget             time.Duration
+	hostCommandTimeout        time.Duration
+	startVMTimeout            time.Duration
+	now                       func() time.Time
+	sleep                     func(context.Context, time.Duration) error
 }
 
 var hypervHostOS = runtime.GOOS
@@ -96,6 +99,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		resumePollInterval:     time.Second,
 		sshReady:               core.WaitForSSHReady,
 		ensureLeaseKey:         core.EnsureTestboxKeyForConfig,
+		waitWindowsVNC:         core.WaitForManagedWindowsLoopbackVNC,
 		runSSHOutput:           core.RunSSHOutput,
 		acquireBudget:          25 * time.Minute,
 		cleanupBudget:          2 * time.Minute,
@@ -105,6 +109,8 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		sleep:                  shared.SleepContext,
 	}
 	b.acquireBudget = max(b.acquireBudget, b.guestReadyBudget+10*time.Minute)
+	b.waitWindowsDesktopSession = b.waitForWindowsDesktopSession
+	b.waitWindowsSSHStable = b.waitForWindowsSSHStable
 	return b
 }
 
@@ -181,6 +187,7 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}
 	cfg := b.configForRun()
+	cfg = windowsCapabilityConfig(cfg, req.Options)
 	if cfg.HyperV.Image == "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires --hyperv-image (path to a Windows VHDX template with a known administrator password; the provider installs OpenSSH if missing)", providerName)
 	}
@@ -240,7 +247,7 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	}()
 	cfg.SSHKey = keyPath
 	name := core.LeaseProviderName(leaseID, slug)
-	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
+	labels := provisionalWindowsCapabilityLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["image"] = cfg.HyperV.Image
 	labels["ssh_user"] = cfg.HyperV.User
@@ -300,7 +307,13 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 			return core.LeaseTarget{}, errors.Join(fmt.Errorf("post-boot SSH key injection failed: %w", retryErr), cleanupFailedLease())
 		}
 	}
-	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
+	if cfg.Desktop {
+		desktopIP, err := b.setUpWindowsDesktop(ctx, cfg, name)
+		if err != nil {
+			return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+		}
+		ip = desktopIP
+	} else if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
 		return core.LeaseTarget{}, errors.Join(fmt.Errorf("guest git setup failed: %w", err), cleanupFailedLease())
 	}
 	// The shared native Windows ready check requires the Node/npm baseline, so
@@ -313,12 +326,27 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	if err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
+	if err := b.finalizeWindowsCapabilities(ctx, cfg, name, &lease); err != nil {
+		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+	}
 	if err := persistLease(leaseID, slug, name, cfg, req, &lease); err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
+}
+
+// setUpWindowsDesktop prepares the guest desktop. Bootstrap reboots the guest and
+// DHCP may hand out a new address, so the IP is rediscovered afterward.
+func (b *backend) setUpWindowsDesktop(ctx context.Context, cfg core.Config, name string) (string, error) {
+	if err := b.ensureWindowsDesktopTerminal(ctx, name, cfg.HyperV.User); err != nil {
+		return "", fmt.Errorf("guest desktop terminal setup failed: %w", err)
+	}
+	if err := b.bootstrapWindowsDesktop(ctx, name, cfg.HyperV.User); err != nil {
+		return "", err
+	}
+	return b.waitForIP(ctx, name, 5*time.Minute)
 }
 
 func (b *backend) prepareWindowsGuestNetwork(ctx context.Context, cfg core.Config, vmName, publicKey string) error {
